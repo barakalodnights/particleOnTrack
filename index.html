@@ -82,6 +82,16 @@
         <button id="clearBtn">Clear Track</button>
         <button id="simulateBtn" disabled>Start Simulation</button>
         <button id="resetBtn" disabled>Reset Particle</button>
+        <div style="margin-left: 20px; display: flex; align-items: center; gap: 15px;">
+            <label style="display: flex; align-items: center; gap: 5px;">
+                Gravity: <input type="range" id="gravitySlider" min="0.1" max="1.0" step="0.1" value="0.3" style="width: 100px;">
+                <span id="gravityValue">0.3</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 5px;">
+                Friction: <input type="range" id="frictionSlider" min="0" max="0.25" step="0.01" value="0.02" style="width: 100px;">
+                <span id="frictionValue">0.02</span>
+            </label>
+        </div>
     </div>
 
     <canvas id="canvas" width="800" height="600"></canvas>
@@ -101,6 +111,10 @@
         const simulateBtn = document.getElementById('simulateBtn');
         const resetBtn = document.getElementById('resetBtn');
         const status = document.getElementById('status');
+        const gravitySlider = document.getElementById('gravitySlider');
+        const gravityValue = document.getElementById('gravityValue');
+        const frictionSlider = document.getElementById('frictionSlider');
+        const frictionValue = document.getElementById('frictionValue');
 
         let isDrawing = false;
         let path = [];
@@ -194,6 +208,11 @@
                 this.maxHistoryLength = 5;
                 this.smoothedTangentialAccel = 0;
                 this.smoothedNormalAccel = 0;
+                
+                // Additional smoothing for vector directions
+                this.smoothedTangent = { x: 0, y: 0 };
+                this.smoothedNormal = { x: 0, y: 0 };
+                this.vectorAlpha = 0.15; // Smoothing for vector directions
             }
 
             update() {
@@ -225,8 +244,8 @@
 
                 this.pathIndex = closestIndex;
 
-                // Apply gravity
-                this.vy += this.gravity;
+                // Apply gravity (use current slider value)
+                this.vy += parseFloat(gravitySlider.value);
 
                 // If particle is close to the track, constrain it
                 if (closestDist < this.radius * 2 && closestPoint) {
@@ -241,10 +260,12 @@
                         const trackNormX = trackDx / trackLength;
                         const trackNormY = trackDy / trackLength;
                         
-                        // Project velocity onto track direction
+                        // Project velocity onto track direction (apply friction as drag)
                         const velDot = this.vx * trackNormX + this.vy * trackNormY;
-                        this.vx = velDot * trackNormX * this.friction;
-                        this.vy = velDot * trackNormY * this.friction;
+                        const currentFriction = parseFloat(frictionSlider.value);
+                        const frictionMultiplier = 1 - currentFriction; // Convert to drag: 0 friction = 1.0 multiplier, 1 friction = 0.0 multiplier
+                        this.vx = velDot * trackNormX * frictionMultiplier;
+                        this.vy = velDot * trackNormY * frictionMultiplier;
                         
                         // Keep particle on track
                         this.x = closestPoint.x;
@@ -283,9 +304,35 @@
                 // Get current tangent and normal vectors
                 const vectors = this.getTangentAndNormal();
                 
-                // Calculate current tangential and normal accelerations
-                const currentTangentialAccel = this.ax * vectors.tangent.x + this.ay * vectors.tangent.y;
-                const currentNormalAccel = this.ax * vectors.normal.x + this.ay * vectors.normal.y;
+                // Smooth the vector directions themselves to reduce curvature noise
+                if (this.smoothedTangent.x === 0 && this.smoothedTangent.y === 0) {
+                    // First frame - initialize
+                    this.smoothedTangent = { x: vectors.tangent.x, y: vectors.tangent.y };
+                    this.smoothedNormal = { x: vectors.normal.x, y: vectors.normal.y };
+                } else {
+                    // Smooth the vector directions
+                    this.smoothedTangent.x = this.vectorAlpha * vectors.tangent.x + (1 - this.vectorAlpha) * this.smoothedTangent.x;
+                    this.smoothedTangent.y = this.vectorAlpha * vectors.tangent.y + (1 - this.vectorAlpha) * this.smoothedTangent.y;
+                    this.smoothedNormal.x = this.vectorAlpha * vectors.normal.x + (1 - this.vectorAlpha) * this.smoothedNormal.x;
+                    this.smoothedNormal.y = this.vectorAlpha * vectors.normal.y + (1 - this.vectorAlpha) * this.smoothedNormal.y;
+                    
+                    // Renormalize the smoothed vectors
+                    const tangentLen = Math.sqrt(this.smoothedTangent.x ** 2 + this.smoothedTangent.y ** 2);
+                    const normalLen = Math.sqrt(this.smoothedNormal.x ** 2 + this.smoothedNormal.y ** 2);
+                    
+                    if (tangentLen > 0) {
+                        this.smoothedTangent.x /= tangentLen;
+                        this.smoothedTangent.y /= tangentLen;
+                    }
+                    if (normalLen > 0) {
+                        this.smoothedNormal.x /= normalLen;
+                        this.smoothedNormal.y /= normalLen;
+                    }
+                }
+                
+                // Calculate current tangential and normal accelerations using smoothed vectors
+                const currentTangentialAccel = this.ax * this.smoothedTangent.x + this.ay * this.smoothedTangent.y;
+                const currentNormalAccel = this.ax * this.smoothedNormal.x + this.ay * this.smoothedNormal.y;
                 
                 // Add to history
                 this.accelHistory.push({
@@ -299,7 +346,7 @@
                 }
                 
                 // Calculate smoothed values using exponential moving average
-                const alpha = 0.05; // Smoothing factor (0 = no smoothing, 1 = no history)
+                const alpha = 0.05; // Smoothing factor for acceleration magnitudes
                 
                 if (this.accelHistory.length === 1) {
                     // First frame
@@ -410,8 +457,11 @@
             }
 
             draw() {
-                // Get tangent and normal vectors
-                const vectors = this.getTangentAndNormal();
+                // Use smoothed tangent and normal vectors for display
+                const vectors = {
+                    tangent: this.smoothedTangent,
+                    normal: this.smoothedNormal
+                };
                 
                 // Use smoothed acceleration values
                 const tangentialAccel = this.smoothedTangentialAccel;
@@ -588,6 +638,15 @@
                 animationId = requestAnimationFrame(animate);
             }
         }
+
+        // Slider event listeners
+        gravitySlider.addEventListener('input', (e) => {
+            gravityValue.textContent = e.target.value;
+        });
+
+        frictionSlider.addEventListener('input', (e) => {
+            frictionValue.textContent = e.target.value;
+        });
 
         // Event listeners
         canvas.addEventListener('mousedown', (e) => {
