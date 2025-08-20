@@ -73,6 +73,16 @@
             font-weight: bold;
             color: #ffd700;
         }
+
+        .score-box {
+            margin-top: 8px;
+            font-weight: bold;
+            color: #fff;
+            background: rgba(0,0,0,0.25);
+            padding: 8px 12px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
     </style>
 </head>
 <body>
@@ -102,6 +112,8 @@
         <p><strong>Vector Legend:</strong> <span style="color: #00b8ff;">Blue = Tangential Acceleration</span> | <span style="color: #ff4757;">Red = Normal Acceleration</span></p>
         <p><em>Vector length shows acceleration magnitude - Path automatically smoothed to reduce noise!</em></p>
         <div class="status" id="status">Ready to draw!</div>
+        <div class="score-box" id="scoreBox">Score: —</div>
+        <div class="score-box" id="highScoreBox">Best (session): — | Best (all-time): —</div>
     </div>
 
     <script>
@@ -115,12 +127,47 @@
         const gravityValue = document.getElementById('gravityValue');
         const frictionSlider = document.getElementById('frictionSlider');
         const frictionValue = document.getElementById('frictionValue');
+        const scoreBox = document.getElementById('scoreBox');
+        const highScoreBox = document.getElementById('highScoreBox');
 
         let isDrawing = false;
         let path = [];
         let particle = null;
         let animationId = null;
         let isSimulating = false;
+        let trackLength = 0;
+        let usedGravity = parseFloat(gravitySlider.value);
+        let usedFriction = parseFloat(frictionSlider.value);
+        let lastCanvasWidth = canvas.width;
+        let lastCanvasHeight = canvas.height;
+        let sessionHighScore = 0;
+        let allTimeHighScore = 0;
+        let currentScore = null;
+        // Celebration state
+        let celebrationActive = false;
+        let celebrationStartMs = 0;
+        const celebrationDurationMs = 4000;
+        let celebrationOrigin = { x: 0, y: 0 };
+        // High score popup state
+        let highScorePopupActive = false;
+        let highScorePopupStartMs = 0;
+        const highScorePopupDurationMs = 2500;
+        let highScorePopupScore = 0;
+        // All-time high popup state
+        let allTimePopupActive = false;
+        let allTimePopupStartMs = 0;
+        const allTimePopupDurationMs = 3000;
+        let allTimePopupScore = 0;
+        // Fireworks state (all-time high)
+        let fireworksActive = false;
+        let fireworksStartMs = 0;
+        const fireworksDurationMs = 6000;
+        let fireworksRockets = [];
+        let fireworksParticles = [];
+        // Proud start face state
+        let proudStartActive = false;
+        let proudStartStartMs = 0;
+        const proudStartDurationMs = 6000;
 
         // Fixed start and end points
         const startPoint = { x: 50, y: 50 };
@@ -189,6 +236,117 @@
             return reduced;
         }
 
+        function calculateTrackLength(points) {
+            if (!points || points.length < 2) return 0;
+            let sum = 0;
+            for (let i = 0; i < points.length - 1; i++) {
+                sum += Math.hypot(points[i + 1].x - points[i].x, points[i + 1].y - points[i].y);
+            }
+            return sum;
+        }
+
+        function computeScore(totalLength, g, mu) {
+            const base = Math.round(totalLength);
+            // Normalize sliders to [0,1]
+            const gNorm = Math.max(0, Math.min(1, (g - 0.1) / 0.9));
+            const muNorm = Math.max(0, Math.min(1, mu / 0.25));
+            // Up to 50% penalty for max gravity, up to 50% bonus for max friction
+            const gravityPenalty = Math.round(base * 0.5 * gNorm);
+            const frictionBonus = Math.round(base * 0.5 * muNorm);
+            const total = Math.max(0, base - gravityPenalty + frictionBonus);
+            return { base, gravityPenalty, frictionBonus, total };
+        }
+
+        function loadHighScores() {
+            try {
+                const stored = localStorage.getItem('particleTrackBest');
+                allTimeHighScore = stored ? parseInt(stored, 10) || 0 : 0;
+            } catch (e) {
+                allTimeHighScore = 0;
+            }
+            updateHighScoreUI();
+        }
+
+        function updateHighScoreUI() {
+            highScoreBox.textContent = `Best (session): ${sessionHighScore || '—'} | Best (all-time): ${allTimeHighScore || '—'}`;
+        }
+
+        function updateHighScores(newScore) {
+            const flags = { newSessionRecord: false, newAllTimeRecord: false };
+            if (typeof newScore !== 'number') {
+                updateHighScoreUI();
+                return flags;
+            }
+            if (newScore > sessionHighScore) {
+                sessionHighScore = newScore;
+                flags.newSessionRecord = true;
+            }
+            if (newScore > allTimeHighScore) {
+                allTimeHighScore = newScore;
+                flags.newAllTimeRecord = true;
+                try {
+                    localStorage.setItem('particleTrackBest', String(allTimeHighScore));
+                } catch (e) {
+                    // ignore storage errors
+                }
+            }
+            updateHighScoreUI();
+            return flags;
+        }
+
+        function resizeCanvasToWindow() {
+            // Fit canvas to available window size while preserving aspect ratio
+            const padding = 40; // page horizontal padding
+            const uiReserve = 260; // approximate vertical space for controls/instructions
+            const maxWidth = Math.max(320, window.innerWidth - padding);
+            const maxHeight = Math.max(240, window.innerHeight - uiReserve);
+
+            const ww = canvas.width;
+            const hh = canvas.height;
+            if (ww <= 0 || hh <= 0) return;
+
+            const scale = Math.min(maxWidth / ww, maxHeight / hh);
+            if (!isFinite(scale) || scale <= 0 || Math.abs(scale - 1) < 0.001) return;
+
+            const newW = Math.max(320, Math.round(ww * scale));
+            const newH = Math.max(240, Math.round(hh * scale));
+
+            const sx = newW / ww;
+            const sy = newH / hh; // same as sx by construction, but keep for clarity
+
+            // Scale existing geometry
+            if (path.length > 0) {
+                for (let i = 0; i < path.length; i++) {
+                    path[i].x *= sx;
+                    path[i].y *= sy;
+                }
+            }
+            if (particle) {
+                particle.x *= sx;
+                particle.y *= sy;
+                // velocities measured in px/frame also scale
+                particle.vx *= sx;
+                particle.vy *= sy;
+            }
+            // Move start/end points accordingly
+            startPoint.x *= sx;
+            startPoint.y *= sy;
+            endPoint.x *= sx;
+            endPoint.y *= sy;
+
+            // Update length (uniform scale)
+            if (trackLength > 0) {
+                trackLength *= sx;
+                scoreBox.textContent = `Score: —  (Track length: ${Math.round(trackLength)})`;
+            }
+
+            // Apply new canvas size
+            lastCanvasWidth = canvas.width = newW;
+            lastCanvasHeight = canvas.height = newH;
+
+            drawScene();
+        }
+
         class Particle {
             constructor(x, y) {
                 this.x = x;
@@ -213,14 +371,21 @@
                 this.smoothedTangent = { x: 0, y: 0 };
                 this.smoothedNormal = { x: 0, y: 0 };
                 this.vectorAlpha = 0.15; // Smoothing for vector directions
+
+                // Track-constrained motion state
+                this.vt = 0; // scalar tangential speed along the track
+                this.currentTangentialAccel = 0;
+                this.currentNormalAccel = 0;
+                this.currentTangent = { x: 0, y: 0 };
+                this.currentNormal = { x: 0, y: 0 };
+                this.completed = false;
             }
 
             update() {
                 if (path.length < 2) return;
 
-                // Store previous velocity for acceleration calculation
-                const prevVx = this.vx;
-                const prevVy = this.vy;
+                const prevX = this.x;
+                const prevY = this.y;
 
                 // Find the closest point on the path
                 let closestDist = Infinity;
@@ -242,50 +407,145 @@
                     }
                 }
 
+
                 this.pathIndex = closestIndex;
 
-                // Apply gravity (use current slider value)
-                this.vy += parseFloat(gravitySlider.value);
+                const g = parseFloat(gravitySlider.value);
 
-                // If particle is close to the track, constrain it
+                // If particle is close to the track, constrain it and evolve along the track
                 if (closestDist < this.radius * 2 && closestPoint) {
-                    // Get track direction
+                    // Get local track direction (unit tangent)
                     const p1 = path[closestIndex];
                     const p2 = path[Math.min(closestIndex + 1, path.length - 1)];
                     const trackDx = p2.x - p1.x;
                     const trackDy = p2.y - p1.y;
                     const trackLength = Math.sqrt(trackDx * trackDx + trackDy * trackDy);
-                    
+
                     if (trackLength > 0) {
-                        const trackNormX = trackDx / trackLength;
-                        const trackNormY = trackDy / trackLength;
-                        
-                        // Project velocity onto track direction (apply friction as drag)
-                        const velDot = this.vx * trackNormX + this.vy * trackNormY;
-                        const currentFriction = parseFloat(frictionSlider.value);
-                        const frictionMultiplier = 1 - currentFriction; // Convert to drag: 0 friction = 1.0 multiplier, 1 friction = 0.0 multiplier
-                        this.vx = velDot * trackNormX * frictionMultiplier;
-                        this.vy = velDot * trackNormY * frictionMultiplier;
-                        
-                        // Keep particle on track
+                        const tHat = { x: trackDx / trackLength, y: trackDy / trackLength };
+
+                        // Initialize tangential speed from current velocity projection (first contact)
+                        const velDot = this.vx * tHat.x + this.vy * tHat.y;
+                        if (this.vt === 0 && Math.abs(velDot) > 0) {
+                            this.vt = velDot;
+                        }
+
+                        // Tangential acceleration from gravity and kinetic friction (opposes motion)
+                        const mu = parseFloat(frictionSlider.value);
+                        const gravityAlongTangent = g * tHat.y; // gravity is +y on canvas
+                        const frictionAlongTangent = mu * g * (this.vt !== 0 ? Math.sign(this.vt) : Math.sign(gravityAlongTangent));
+                        const aT = gravityAlongTangent - frictionAlongTangent;
+
+                        // Update tangential speed and velocity vector
+                        this.vt += aT;
+                        this.vx = this.vt * tHat.x;
+                        this.vy = this.vt * tHat.y;
+
+                        // Keep particle on track (project position to closest point), then advance by velocity
                         this.x = closestPoint.x;
                         this.y = closestPoint.y;
+
+                        // Curvature-based normal acceleration a_n = v^2 * kappa (signed)
+                        const i = closestIndex;
+                        const prevIdx = Math.max(i - 1, 0);
+                        const nextIdx = Math.min(i + 1, path.length - 1);
+                        const prevPt = path[prevIdx];
+                        const currPt = path[i];
+                        const nextPt = path[nextIdx];
+
+                        function normalize(dx, dy) {
+                            const len = Math.hypot(dx, dy);
+                            return len > 0 ? { x: dx / len, y: dy / len } : { x: tHat.x, y: tHat.y };
+                        }
+                        const tPrev = normalize(currPt.x - prevPt.x, currPt.y - prevPt.y);
+                        const tNext = normalize(nextPt.x - currPt.x, nextPt.y - currPt.y);
+                        const dotTN = Math.max(-1, Math.min(1, tPrev.x * tNext.x + tPrev.y * tNext.y));
+                        const theta = Math.acos(dotTN);
+                        const ds = 0.5 * (Math.hypot(currPt.x - prevPt.x, currPt.y - prevPt.y) + Math.hypot(nextPt.x - currPt.x, nextPt.y - currPt.y));
+                        let kappa = ds > 0 ? theta / ds : 0;
+                        const crossZ = tPrev.x * tNext.y - tPrev.y * tNext.x;
+                        const sign = Math.sign(crossZ);
+                        kappa *= sign; // signed curvature
+
+                        const nLeft = { x: -tHat.y, y: tHat.x };
+                        const nRight = { x: tHat.y, y: -tHat.x };
+                        const nHat = sign >= 0 ? nLeft : nRight;
+
+                        // Store current geometric/kinematic quantities for smoothing and drawing
+                        this.currentTangent = tHat;
+                        this.currentNormal = nHat;
+                        this.currentTangentialAccel = aT;
+                        this.currentNormalAccel = this.vt * this.vt * kappa;
                     }
                 } else {
-                    // Free fall with air resistance
+                    // Free fall with simple air resistance
+                    this.vy += g;
                     this.vx *= 0.995;
                     this.vy *= 0.995;
+
+                    // No meaningful tangential/normal components off the track
+                    this.currentTangentialAccel = 0;
+                    this.currentNormalAccel = 0;
+                    this.currentTangent = { x: 0, y: 0 };
+                    this.currentNormal = { x: 0, y: 0 };
                 }
 
-                // Update position
+                // Update position after velocity update
                 this.x += this.vx;
                 this.y += this.vy;
 
-                // Calculate acceleration (change in velocity)
-                this.ax = this.vx - prevVx;
-                this.ay = this.vy - prevVy;
+                // Robust arrival detection: segment-circle intersection or proximity
+                const captureRadius = 18; // slightly larger than drawn END node
+                const dxEndNow = this.x - endPoint.x;
+                const dyEndNow = this.y - endPoint.y;
+                const distEndNow = Math.hypot(dxEndNow, dyEndNow);
 
-                // Update smoothed acceleration vectors
+                const intersectsEnd = (function segCircle(x1, y1, x2, y2, cx, cy, r) {
+                    const vx = x2 - x1;
+                    const vy = y2 - y1;
+                    const wx = cx - x1;
+                    const wy = cy - y1;
+                    const vv = vx * vx + vy * vy;
+                    if (vv === 0) return Math.hypot(cx - x1, cy - y1) <= r;
+                    let t = (wx * vx + wy * vy) / vv;
+                    t = Math.max(0, Math.min(1, t));
+                    const px = x1 + t * vx;
+                    const py = y1 + t * vy;
+                    const d = Math.hypot(px - cx, py - cy);
+                    return d <= r;
+                })(prevX, prevY, this.x, this.y, endPoint.x, endPoint.y, captureRadius);
+
+                if (intersectsEnd || distEndNow <= captureRadius) {
+                    this.x = endPoint.x;
+                    this.y = endPoint.y;
+                    this.vx = 0;
+                    this.vy = 0;
+                    this.vt = 0;
+                    this.currentTangentialAccel = 0;
+                    this.currentNormalAccel = 0;
+                    this.updateSmoothedAcceleration();
+                    this.completed = true;
+                    // Score on arrival
+                    const result = computeScore(trackLength, usedGravity, usedFriction);
+                    scoreBox.textContent = `Score: ${result.total}  (Base: ${result.base}  - Gravity: ${result.gravityPenalty}  + Friction: ${result.frictionBonus})`;
+                    const flags = updateHighScores(result.total);
+                    currentScore = result.total;
+                    if (flags.newSessionRecord) {
+                        startCelebration(this.x, this.y);
+                        if (!flags.newAllTimeRecord) {
+                            startHighScorePopup(currentScore);
+                        }
+                    }
+                    if (flags.newAllTimeRecord) {
+                        startFireworks();
+                        proudStartActive = true;
+                        proudStartStartMs = performance.now();
+                        startAllTimePopup(currentScore);
+                    }
+                    return;
+                }
+
+                // Update smoothed acceleration vectors based on current tangential/normal components
                 this.updateSmoothedAcceleration();
 
                 // Bounce off walls
@@ -301,53 +561,49 @@
             }
 
             updateSmoothedAcceleration() {
-                // Get current tangent and normal vectors
-                const vectors = this.getTangentAndNormal();
-                
-                // Smooth the vector directions themselves to reduce curvature noise
+                // Smooth tangent direction; recompute normal as exact perpendicular
+                const vectors = { tangent: this.currentTangent, normal: this.currentNormal };
+
                 if (this.smoothedTangent.x === 0 && this.smoothedTangent.y === 0) {
                     // First frame - initialize
                     this.smoothedTangent = { x: vectors.tangent.x, y: vectors.tangent.y };
-                    this.smoothedNormal = { x: vectors.normal.x, y: vectors.normal.y };
                 } else {
-                    // Smooth the vector directions
+                    // Smooth the tangent direction
                     this.smoothedTangent.x = this.vectorAlpha * vectors.tangent.x + (1 - this.vectorAlpha) * this.smoothedTangent.x;
                     this.smoothedTangent.y = this.vectorAlpha * vectors.tangent.y + (1 - this.vectorAlpha) * this.smoothedTangent.y;
-                    this.smoothedNormal.x = this.vectorAlpha * vectors.normal.x + (1 - this.vectorAlpha) * this.smoothedNormal.x;
-                    this.smoothedNormal.y = this.vectorAlpha * vectors.normal.y + (1 - this.vectorAlpha) * this.smoothedNormal.y;
-                    
-                    // Renormalize the smoothed vectors
+                    // Renormalize
                     const tangentLen = Math.sqrt(this.smoothedTangent.x ** 2 + this.smoothedTangent.y ** 2);
-                    const normalLen = Math.sqrt(this.smoothedNormal.x ** 2 + this.smoothedNormal.y ** 2);
-                    
                     if (tangentLen > 0) {
                         this.smoothedTangent.x /= tangentLen;
                         this.smoothedTangent.y /= tangentLen;
                     }
-                    if (normalLen > 0) {
-                        this.smoothedNormal.x /= normalLen;
-                        this.smoothedNormal.y /= normalLen;
-                    }
                 }
-                
-                // Calculate current tangential and normal accelerations using smoothed vectors
-                const currentTangentialAccel = this.ax * this.smoothedTangent.x + this.ay * this.smoothedTangent.y;
-                const currentNormalAccel = this.ax * this.smoothedNormal.x + this.ay * this.smoothedNormal.y;
-                
+
+                // Exact perpendicular normal from smoothed tangent; orient by current normal acceleration sign
+                let perp = { x: -this.smoothedTangent.y, y: this.smoothedTangent.x };
+                if (this.currentNormalAccel < 0) {
+                    perp = { x: -perp.x, y: -perp.y };
+                }
+                this.smoothedNormal = perp;
+
+                // Use current analytically-computed components for smoothing magnitudes
+                const currentTangentialAccel = this.currentTangentialAccel;
+                const currentNormalAccel = this.currentNormalAccel;
+
                 // Add to history
                 this.accelHistory.push({
                     tangential: currentTangentialAccel,
                     normal: currentNormalAccel
                 });
-                
+
                 // Keep history within limit
                 if (this.accelHistory.length > this.maxHistoryLength) {
                     this.accelHistory.shift();
                 }
-                
+
                 // Calculate smoothed values using exponential moving average
                 const alpha = 0.05; // Smoothing factor for acceleration magnitudes
-                
+
                 if (this.accelHistory.length === 1) {
                     // First frame
                     this.smoothedTangentialAccel = currentTangentialAccel;
@@ -482,7 +738,8 @@
                     const tangentEndY = this.y + vectors.tangent.y * tangentLength * tangentDir;
                     
                     // Tangent vector line
-                    ctx.strokeStyle = tangentialAccel >= 0 ? '#00b8ff' : '#0077cc';
+                    const tangentColor = tangentialAccel >= 0 ? '#00b8ff' : '#0077cc';
+                    ctx.strokeStyle = tangentColor;
                     ctx.lineWidth = 3;
                     ctx.lineCap = 'round';
                     ctx.beginPath();
@@ -493,7 +750,7 @@
                     // Tangent vector arrowhead
                     const arrowSize = Math.min(8, tangentLength / 3);
                     const angle = Math.atan2(vectors.tangent.y * tangentDir, vectors.tangent.x * tangentDir);
-                    ctx.fillStyle = tangentialAccel >= 0 ? '#00b8ff' : '#0077cc';
+                    ctx.fillStyle = tangentColor;
                     ctx.beginPath();
                     ctx.moveTo(tangentEndX, tangentEndY);
                     ctx.lineTo(
@@ -506,6 +763,27 @@
                     );
                     ctx.closePath();
                     ctx.fill();
+
+                    // Tangent label "a_t" with subscript at the tip
+                    const labelOffset = 10;
+                    const labelX = tangentEndX + labelOffset * Math.cos(angle);
+                    const labelY = tangentEndY + labelOffset * Math.sin(angle);
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'alphabetic';
+                    // Outline for readability
+                    ctx.lineWidth = 4;
+                    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                    // Base 'a'
+                    ctx.font = 'bold 14px Arial';
+                    ctx.strokeText('a', labelX, labelY);
+                    ctx.fillStyle = tangentColor;
+                    ctx.fillText('a', labelX, labelY);
+                    // Subscript 't'
+                    const subX = labelX + 8;
+                    const subY = labelY + 3;
+                    ctx.font = 'bold 10px Arial';
+                    ctx.strokeText('t', subX, subY);
+                    ctx.fillText('t', subX, subY);
                 }
 
                 // Draw normal vector (centripetal acceleration) - Red
@@ -516,7 +794,8 @@
                     const normalEndY = this.y + vectors.normal.y * normalLength * normalDir;
                     
                     // Normal vector line
-                    ctx.strokeStyle = normalAccel >= 0 ? '#ff4757' : '#cc2e3f';
+                    const normalColor = normalAccel >= 0 ? '#ff4757' : '#cc2e3f';
+                    ctx.strokeStyle = normalColor;
                     ctx.lineWidth = 3;
                     ctx.lineCap = 'round';
                     ctx.beginPath();
@@ -527,7 +806,7 @@
                     // Normal vector arrowhead
                     const arrowSize = Math.min(8, normalLength / 3);
                     const angle = Math.atan2(vectors.normal.y * normalDir, vectors.normal.x * normalDir);
-                    ctx.fillStyle = normalAccel >= 0 ? '#ff4757' : '#cc2e3f';
+                    ctx.fillStyle = normalColor;
                     ctx.beginPath();
                     ctx.moveTo(normalEndX, normalEndY);
                     ctx.lineTo(
@@ -540,6 +819,27 @@
                     );
                     ctx.closePath();
                     ctx.fill();
+
+                    // Normal label "a_n" with subscript at the tip
+                    const labelOffset = 10;
+                    const labelX = normalEndX + labelOffset * Math.cos(angle);
+                    const labelY = normalEndY + labelOffset * Math.sin(angle);
+                    ctx.textAlign = 'left';
+                    ctx.textBaseline = 'alphabetic';
+                    // Outline for readability
+                    ctx.lineWidth = 4;
+                    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+                    // Base 'a'
+                    ctx.font = 'bold 14px Arial';
+                    ctx.strokeText('a', labelX, labelY);
+                    ctx.fillStyle = normalColor;
+                    ctx.fillText('a', labelX, labelY);
+                    // Subscript 'n'
+                    const subX = labelX + 8;
+                    const subY = labelY + 3;
+                    ctx.font = 'bold 10px Arial';
+                    ctx.strokeText('n', subX, subY);
+                    ctx.fillText('n', subX, subY);
                 }
 
                 // Particle shadow
@@ -577,15 +877,105 @@
             ctx.fillStyle = gradient;
             ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-            // Draw start point
-            ctx.fillStyle = '#ff4757';
-            ctx.beginPath();
-            ctx.arc(startPoint.x, startPoint.y, 15, 0, Math.PI * 2);
-            ctx.fill();
-            ctx.fillStyle = 'white';
-            ctx.font = 'bold 12px Arial';
-            ctx.textAlign = 'center';
-            ctx.fillText('START', startPoint.x, startPoint.y - 25);
+            // Draw start point or proud face
+            const nowTs = performance.now();
+            const proudShowing = proudStartActive && (nowTs - proudStartStartMs < proudStartDurationMs);
+            if (proudShowing) {
+                const elapsedProud = nowTs - proudStartStartMs;
+                const phase = Math.min(1, Math.max(0, elapsedProud / proudStartDurationMs));
+                const seg = phase * 3; // 0..1 mouth open, 1..2 tongue, 2..3 wink
+                const pulse = 1 + 0.08 * Math.sin(nowTs * 0.01);
+                const r = 18 * pulse;
+                // Face circle
+                ctx.fillStyle = '#ffd166';
+                ctx.beginPath();
+                ctx.arc(startPoint.x, startPoint.y, r, 0, Math.PI * 2);
+                ctx.fill();
+
+                const faceDark = '#2c3e50';
+                // Eyes (default: two dots)
+                const exOff = r * 0.4;
+                const eyOff = -r * 0.2;
+                const eyeR = r * 0.12;
+                if (seg < 2) {
+                    // Both eyes open
+                    ctx.fillStyle = faceDark;
+                    ctx.beginPath();
+                    ctx.arc(startPoint.x - exOff, startPoint.y + eyOff, eyeR, 0, Math.PI * 2);
+                    ctx.arc(startPoint.x + exOff, startPoint.y + eyOff, eyeR, 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    // Wink: right eye open, left eye closed line
+                    ctx.fillStyle = faceDark;
+                    ctx.beginPath();
+                    ctx.arc(startPoint.x + exOff, startPoint.y + eyOff, eyeR, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.strokeStyle = faceDark;
+                    ctx.lineCap = 'round';
+                    ctx.lineWidth = Math.max(2, r * 0.18);
+                    ctx.beginPath();
+                    const lx1 = startPoint.x - exOff - eyeR * 0.8;
+                    const lx2 = startPoint.x - exOff + eyeR * 0.8;
+                    const ly = startPoint.y + eyOff;
+                    ctx.moveTo(lx1, ly);
+                    ctx.lineTo(lx2, ly);
+                    ctx.stroke();
+                }
+
+                // Mouth animation
+                if (seg < 1) {
+                    // Open mouth
+                    const mouthR = r * 0.35;
+                    ctx.fillStyle = faceDark;
+                    ctx.beginPath();
+                    ctx.arc(startPoint.x, startPoint.y + r * 0.2, mouthR, 0, Math.PI * 2);
+                    ctx.fill();
+                } else if (seg < 2) {
+                    // Tongue out
+                    const mouthR = r * 0.35;
+                    ctx.fillStyle = faceDark;
+                    ctx.beginPath();
+                    ctx.arc(startPoint.x, startPoint.y + r * 0.2, mouthR, 0, Math.PI * 2);
+                    ctx.fill();
+                    // Tongue inside mouth
+                    const tongueLen = mouthR * 1.1;
+                    const tongueW = mouthR * 0.9;
+                    const tongueOffset = 4 * Math.sin(nowTs * 0.02);
+                    ctx.fillStyle = '#ff6b81';
+                    ctx.beginPath();
+                    ctx.moveTo(startPoint.x - tongueW * 0.5, startPoint.y + r * 0.2);
+                    ctx.quadraticCurveTo(
+                        startPoint.x,
+                        startPoint.y + r * 0.2 + tongueLen * 0.6 + tongueOffset,
+                        startPoint.x + tongueW * 0.5,
+                        startPoint.y + r * 0.2
+                    );
+                    ctx.quadraticCurveTo(
+                        startPoint.x,
+                        startPoint.y + r * 0.2 + tongueLen * 0.8 + tongueOffset,
+                        startPoint.x - tongueW * 0.5,
+                        startPoint.y + r * 0.2
+                    );
+                    ctx.fill();
+                } else {
+                    // Proud smile
+                    ctx.strokeStyle = faceDark;
+                    ctx.lineWidth = Math.max(2, r * 0.12);
+                    ctx.beginPath();
+                    const smileR = r * 0.55;
+                    ctx.arc(startPoint.x, startPoint.y + r * 0.05, smileR, 0.15 * Math.PI, 0.85 * Math.PI, false);
+                    ctx.stroke();
+                }
+            } else {
+                ctx.fillStyle = '#ff4757';
+                ctx.beginPath();
+                ctx.arc(startPoint.x, startPoint.y, 15, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.fillStyle = 'white';
+                ctx.font = 'bold 12px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('START', startPoint.x, startPoint.y - 25);
+            }
 
             // Draw end point
             ctx.fillStyle = '#2ed573';
@@ -623,20 +1013,400 @@
                 ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
                 ctx.lineWidth = 2;
                 ctx.stroke();
+
+                // Celebration pulsating glow on track
+                if (celebrationActive) {
+                    const now = performance.now();
+                    const elapsed = now - celebrationStartMs;
+                    const t = Math.min(1, Math.max(0, elapsed / celebrationDurationMs));
+                    const pulse = 0.5 + 0.5 * Math.sin(2 * Math.PI * (3 * t) + now * 0.01);
+                    const glowAlpha = 0.25 + 0.45 * (1 - t) * pulse;
+                    const glowWidth = 10 + 10 * pulse;
+                    ctx.save();
+                    ctx.globalCompositeOperation = 'lighter';
+                    ctx.strokeStyle = `rgba(116, 185, 255, ${glowAlpha.toFixed(3)})`;
+                    ctx.lineWidth = glowWidth;
+                    ctx.beginPath();
+                    ctx.moveTo(path[0].x, path[0].y);
+                    for (let i = 1; i < path.length; i++) {
+                        ctx.lineTo(path[i].x, path[i].y);
+                    }
+                    ctx.stroke();
+                    ctx.restore();
+                }
             }
 
             // Draw particle
             if (particle) {
                 particle.draw();
             }
+
+            // Overlay scores at top-right inside the canvas
+            drawScoresOverlay();
+
+            // Celebration laser beams from ball
+            if (celebrationActive) {
+                drawCelebrationBeams();
+            }
+
+            // High score popup overlay
+            if (highScorePopupActive) {
+                drawHighScorePopup();
+            }
+
+            // Fireworks (all-time high)
+            if (fireworksActive || fireworksRockets.length > 0 || fireworksParticles.length > 0) {
+                updateAndDrawFireworks();
+            }
+
+            // All-time popup overlay
+            if (allTimePopupActive) {
+                drawAllTimePopup();
+            }
+        }
+
+        function drawScoresOverlay() {
+            const margin = 12;
+            const paddingX = 10;
+            const paddingY = 8;
+            const lineGap = 4;
+
+            // Prepare strings
+            const scoreText = `Score: ${currentScore !== null ? currentScore : '—'}`;
+            const sessionText = `Best (session): ${sessionHighScore || '—'}`;
+            const allTimeText = `Best (all-time): ${allTimeHighScore || '—'}`;
+            const lines = [scoreText, sessionText, allTimeText];
+
+            // Measure box size
+            ctx.save();
+            ctx.font = 'bold 14px Arial';
+            let maxWidth = 0;
+            for (const t of lines) {
+                maxWidth = Math.max(maxWidth, ctx.measureText(t).width);
+            }
+            const lineHeight = 18;
+            const boxWidth = Math.ceil(maxWidth + paddingX * 2);
+            const boxHeight = Math.ceil(lines.length * lineHeight + paddingY * 2 + (lines.length - 1) * lineGap);
+            const x = canvas.width - margin - boxWidth;
+            const y = margin;
+
+            // Background
+            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            ctx.fillRect(x, y, boxWidth, boxHeight);
+
+            // Text
+            let ty = y + paddingY + 12;
+            ctx.fillStyle = '#ffffff';
+            ctx.textBaseline = 'alphabetic';
+            for (let i = 0; i < lines.length; i++) {
+                const t = lines[i];
+                // Bold for first line (current score)
+                ctx.font = i === 0 ? 'bold 14px Arial' : '12px Arial';
+                ctx.fillText(t, x + paddingX, ty);
+                ty += (i === 0 ? lineHeight : 14) + lineGap;
+            }
+            ctx.restore();
+        }
+
+        function startCelebration(x, y) {
+            celebrationActive = true;
+            celebrationStartMs = performance.now();
+            celebrationOrigin = { x, y };
+            // Ensure the loop runs even if simulation already stopped
+            if (!isSimulating && !animationId) {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function drawCelebrationBeams() {
+            const now = performance.now();
+            const elapsed = now - celebrationStartMs;
+            const t = Math.min(1, Math.max(0, elapsed / celebrationDurationMs));
+            const decay = 1 - t;
+            const basePulse = 0.5 + 0.5 * Math.sin(now * 0.01);
+            const numBeams = 28;
+            const maxLen = 160;
+            const minLen = 60;
+
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            for (let i = 0; i < numBeams; i++) {
+                const angle = (i / numBeams) * Math.PI * 2 + now * 0.001 * (i % 2 === 0 ? 1 : -1);
+                const pulse = 0.5 + 0.5 * Math.sin(now * 0.02 + i);
+                const len = (minLen + (maxLen - minLen) * pulse) * decay;
+                const x2 = celebrationOrigin.x + Math.cos(angle) * len;
+                const y2 = celebrationOrigin.y + Math.sin(angle) * len;
+                const hue = 200 + 40 * Math.sin(i * 0.5 + now * 0.005);
+                const alpha = 0.25 + 0.45 * basePulse * decay;
+
+                // Outer soft beam
+                ctx.strokeStyle = `hsla(${hue}, 90%, 65%, ${alpha})`;
+                ctx.lineWidth = 4 + 3 * pulse;
+                ctx.beginPath();
+                ctx.moveTo(celebrationOrigin.x, celebrationOrigin.y);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+
+                // Inner bright core
+                ctx.strokeStyle = `hsla(${hue}, 100%, 85%, ${Math.min(1, alpha + 0.2)})`;
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(celebrationOrigin.x, celebrationOrigin.y);
+                ctx.lineTo(x2, y2);
+                ctx.stroke();
+            }
+            ctx.restore();
+        }
+
+        function startHighScorePopup(score) {
+            highScorePopupActive = true;
+            highScorePopupStartMs = performance.now();
+            highScorePopupScore = score || 0;
+            if (!isSimulating && !animationId) {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function drawHighScorePopup() {
+            const now = performance.now();
+            const elapsed = now - highScorePopupStartMs;
+            const t = Math.min(1, Math.max(0, elapsed / highScorePopupDurationMs));
+
+            // Fade in/out profile
+            let alpha = 1;
+            if (t < 0.2) alpha = t / 0.2; else if (t > 0.8) alpha = (1 - t) / 0.2; else alpha = 1;
+            alpha = Math.max(0, Math.min(1, alpha));
+
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+
+            // Text content
+            const title = 'NEW HIGH SCORE!';
+            const scoreText = `Score: ${highScorePopupScore}`;
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+
+            // Measure box
+            ctx.font = 'bold 28px Arial';
+            const titleW = ctx.measureText(title).width;
+            ctx.font = 'bold 20px Arial';
+            const scoreW = ctx.measureText(scoreText).width;
+            const boxW = Math.max(titleW, scoreW) + 40;
+            const boxH = 28 + 12 + 20 + 24; // title + spacer + score + padding
+
+            const x = cx - boxW / 2;
+            const y = cy - boxH / 2;
+
+            // Backdrop
+            ctx.fillStyle = 'rgba(0,0,0,0.55)';
+            ctx.fillRect(x, y, boxW, boxH);
+
+            // Title
+            ctx.font = 'bold 28px Arial';
+            const grad = ctx.createLinearGradient(x, y, x + boxW, y);
+            grad.addColorStop(0, '#ffe066');
+            grad.addColorStop(1, '#ffd43b');
+            ctx.fillStyle = grad;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(title, cx, y + 10);
+
+            // Score line
+            ctx.font = 'bold 20px Arial';
+            ctx.fillStyle = '#ffffff';
+            ctx.textBaseline = 'alphabetic';
+            ctx.fillText(scoreText, cx, y + boxH - 14);
+
+            ctx.restore();
+        }
+
+        function startAllTimePopup(score) {
+            allTimePopupActive = true;
+            allTimePopupStartMs = performance.now();
+            allTimePopupScore = score || 0;
+            if (!isSimulating && !animationId) {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function drawAllTimePopup() {
+            const now = performance.now();
+            const elapsed = now - allTimePopupStartMs;
+            const t = Math.min(1, Math.max(0, elapsed / allTimePopupDurationMs));
+
+            // Fade profile
+            let alpha = 1;
+            if (t < 0.2) alpha = t / 0.2; else if (t > 0.8) alpha = (1 - t) / 0.2; else alpha = 1;
+            alpha = Math.max(0, Math.min(1, alpha));
+
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2 - 60; // offset a bit above
+
+            // Text content
+            const title = 'NEW ALL-TIME HIGH SCORE!!!';
+            const scoreText = `Score: ${allTimePopupScore}`;
+
+            ctx.save();
+            ctx.globalAlpha = alpha;
+
+            // Measure box
+            ctx.font = 'bold 30px Arial';
+            const titleW = ctx.measureText(title).width;
+            ctx.font = 'bold 22px Arial';
+            const scoreW = ctx.measureText(scoreText).width;
+            const boxW = Math.max(titleW, scoreW) + 48;
+            const boxH = 30 + 12 + 22 + 28;
+
+            const x = cx - boxW / 2;
+            const y = cy - boxH / 2;
+
+            // Backdrop
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(x, y, boxW, boxH);
+
+            // Title with vibrant gradient
+            ctx.font = 'bold 30px Arial';
+            const grad = ctx.createLinearGradient(x, y, x + boxW, y);
+            grad.addColorStop(0, '#ff6b6b');
+            grad.addColorStop(0.5, '#ffd93d');
+            grad.addColorStop(1, '#6bcBff');
+            ctx.fillStyle = grad;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'top';
+            ctx.fillText(title, cx, y + 10);
+
+            // Score line
+            ctx.font = 'bold 22px Arial';
+            ctx.fillStyle = '#ffffff';
+            ctx.textBaseline = 'alphabetic';
+            ctx.fillText(scoreText, cx, y + boxH - 16);
+
+            ctx.restore();
+        }
+
+        function startFireworks() {
+            fireworksActive = true;
+            fireworksStartMs = performance.now();
+            fireworksRockets = [];
+            fireworksParticles = [];
+            if (!isSimulating && !animationId) {
+                animationId = requestAnimationFrame(animate);
+            }
+        }
+
+        function updateAndDrawFireworks() {
+            const now = performance.now();
+            const elapsed = now - fireworksStartMs;
+            const activeWindow = elapsed < fireworksDurationMs;
+
+            // Spawn rockets during active window
+            if (fireworksActive && activeWindow) {
+                // Spawn a few rockets with some randomness
+                if (Math.random() < 0.12) {
+                    const x = 40 + Math.random() * (canvas.width - 80);
+                    const y = canvas.height + 10;
+                    const vy = -(4 + Math.random() * 2.5);
+                    const vx = (Math.random() - 0.5) * 1.2;
+                    fireworksRockets.push({ x, y, vx, vy, color: `hsl(${Math.floor(200 + Math.random()*120)}, 90%, 60%)` });
+                }
+            } else if (fireworksActive && !activeWindow) {
+                fireworksActive = false;
+            }
+
+            // Update rockets
+            const newParticles = [];
+            for (let i = fireworksRockets.length - 1; i >= 0; i--) {
+                const r = fireworksRockets[i];
+                r.x += r.vx;
+                r.y += r.vy;
+                r.vy += 0.05; // gravity
+                // Explode when slowing or reaching upper third
+                if (r.vy > -0.3 || r.y < canvas.height * (0.25 + Math.random()*0.1)) {
+                    fireworksRockets.splice(i, 1);
+                    const count = 50 + Math.floor(Math.random() * 50);
+                    for (let k = 0; k < count; k++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        const speed = 1.5 + Math.random() * 3.5;
+                        const pvx = Math.cos(angle) * speed;
+                        const pvy = Math.sin(angle) * speed;
+                        const life = 700 + Math.random() * 700; // ms
+                        const hue = 200 + Math.random() * 120;
+                        newParticles.push({ x: r.x, y: r.y, vx: pvx, vy: pvy, life, born: now, hue });
+                    }
+                }
+            }
+            fireworksParticles.push(...newParticles);
+
+            // Update particles
+            for (let i = fireworksParticles.length - 1; i >= 0; i--) {
+                const p = fireworksParticles[i];
+                const age = now - p.born;
+                if (age > p.life) {
+                    fireworksParticles.splice(i, 1);
+                    continue;
+                }
+                p.x += p.vx;
+                p.y += p.vy;
+                p.vx *= 0.99;
+                p.vy *= 0.99;
+                p.vy += 0.06;
+            }
+
+            // Draw fireworks
+            ctx.save();
+            ctx.globalCompositeOperation = 'lighter';
+            // Rockets
+            for (const r of fireworksRockets) {
+                ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(r.x, r.y);
+                ctx.lineTo(r.x - r.vx * 2, r.y - r.vy * 2);
+                ctx.stroke();
+            }
+            // Particles
+            for (const p of fireworksParticles) {
+                const age = now - p.born;
+                const t = age / p.life;
+                const alpha = Math.max(0, 1 - t);
+                const size = 2 + 2 * (1 - t);
+                ctx.fillStyle = `hsla(${p.hue.toFixed(0)}, 100%, 65%, ${alpha})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.restore();
         }
 
         function animate() {
             if (particle && isSimulating) {
                 particle.update();
-                drawScene();
-                animationId = requestAnimationFrame(animate);
+                if (particle.completed) {
+                    // Do not stop the loop; allow celebration to render
+                    isSimulating = false;
+                    simulateBtn.disabled = true;
+                    resetBtn.disabled = false;
+                    status.textContent = 'Arrived at end! Simulation complete.';
+                }
             }
+            // Always draw a frame to show overlays/celebration
+            drawScene();
+            // Stop when nothing to animate
+            const celebrating = celebrationActive && (performance.now() - celebrationStartMs < celebrationDurationMs);
+            const popupShowing = highScorePopupActive && (performance.now() - highScorePopupStartMs < highScorePopupDurationMs);
+            const allTimeShowing = allTimePopupActive && (performance.now() - allTimePopupStartMs < allTimePopupDurationMs);
+            const fireworksShowing = fireworksActive || fireworksRockets.length > 0 || fireworksParticles.length > 0;
+            const proudShowing = proudStartActive && (performance.now() - proudStartStartMs < proudStartDurationMs);
+            if (!isSimulating && (!celebrating) && (!popupShowing) && (!allTimeShowing) && (!fireworksShowing) && (!proudShowing)) {
+                celebrationActive = false;
+                highScorePopupActive = false;
+                allTimePopupActive = false;
+                proudStartActive = false;
+                fireworksActive = false;
+                return;
+            }
+            animationId = requestAnimationFrame(animate);
         }
 
         // Slider event listeners
@@ -675,15 +1445,22 @@
                 if (isNearPoint(mousePos, endPoint, 30)) {
                     path.push({ x: endPoint.x, y: endPoint.y });
                     
-                    // Smooth the path to reduce noise
-                    path = reducePathPoints(path, 4); // Remove closely spaced points first
-                    path = smoothPath(path, 5); // Then apply smoothing
+                    // Smooth the path to reduce noise (more aggressive)
+                    path = reducePathPoints(path, 6); // Remove more closely spaced points
+                    path = smoothPath(path, 9); // Apply stronger smoothing
+                    path = smoothPath(path, 9); // Second pass for extra smoothing
+                    trackLength = calculateTrackLength(path);
                     
                     simulateBtn.disabled = false;
                     status.textContent = 'Great! Path smoothed and ready. Click "Start Simulation" to begin!';
+                    scoreBox.textContent = `Score: —  (Track length: ${Math.round(trackLength)})`;
+                    updateHighScoreUI();
                 } else {
                     status.textContent = 'Path must end near the green circle. Try again!';
                     path = [];
+                    trackLength = 0;
+                    scoreBox.textContent = 'Score: —';
+                    updateHighScoreUI();
                 }
                 drawScene();
             }
@@ -693,6 +1470,7 @@
             path = [];
             particle = null;
             isSimulating = false;
+            currentScore = null;
             if (animationId) {
                 cancelAnimationFrame(animationId);
                 animationId = null;
@@ -700,6 +1478,8 @@
             simulateBtn.disabled = true;
             resetBtn.disabled = true;
             status.textContent = 'Ready to draw!';
+            scoreBox.textContent = 'Score: —';
+            updateHighScoreUI();
             drawScene();
         });
 
@@ -710,6 +1490,9 @@
                 simulateBtn.disabled = true;
                 resetBtn.disabled = false;
                 status.textContent = 'Simulation running! Watch the particle roll down your track!';
+                // Capture settings used for this run
+                usedGravity = parseFloat(gravitySlider.value);
+                usedFriction = parseFloat(frictionSlider.value);
                 animate();
             }
         });
@@ -723,11 +1506,21 @@
             isSimulating = false;
             simulateBtn.disabled = false;
             status.textContent = 'Particle reset. Click "Start Simulation" to run again!';
+            scoreBox.textContent = trackLength ? `Score: —  (Track length: ${Math.round(trackLength)})` : 'Score: —';
+            updateHighScoreUI();
             drawScene();
         });
 
         // Initial draw
         drawScene();
+        // Responsive sizing
+        window.addEventListener('resize', () => {
+            resizeCanvasToWindow();
+        });
+        // Run once on load to fit initial window
+        resizeCanvasToWindow();
+        // Load highs
+        loadHighScores();
     </script>
 </body>
 </html>
